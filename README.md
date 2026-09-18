@@ -5,14 +5,7 @@ Download a SlideShare presentation as a single PDF — from a terminal UI or the
 Paste a presentation link, the script finds the slide images the SlideShare viewer serves from
 `image.slidesharecdn.com`, downloads them in parallel and merges them into one PDF.
 
-```
-┌ Presentation ──────────────────────────────────────────────┐
-│ Netflix case study                                          │
-│ 31 slides, uploaded by ...                                  │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
+[![asciicast](https://asciinema.org/a/wjFtXvfRefEB0qL6.svg)](https://asciinema.org/a/wjFtXvfRefEB0qL6)
 
 ## Features
 
@@ -52,7 +45,7 @@ uv run slideshare2pdf.py
 ### Option 2 — `pipx` (installs it as a normal command)
 
 ```bash
-pipx install git+https://github.com/<your-user>/slideshare2pdf.git
+pipx install git+https://github.com/LuCaSkooo1/slideshare2pdf.git
 slideshare2pdf
 ```
 
