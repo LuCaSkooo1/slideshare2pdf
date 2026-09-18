@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.uv/
+
+# Tool output
+*.pdf
+*_slides/
+slideshare2pdf-*/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
