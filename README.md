@@ -39,7 +39,7 @@ The script carries [PEP 723](https://peps.python.org/pep-0723/) inline metadata,
 dependencies for you:
 
 ```bash
-uv run slideshare2pdf.py
+uvx --from git+https://github.com/LuCaSkooo1/slideshare2pdf slideshare2pdf
 ```
 
 ### Option 2 — `pipx` (installs it as a normal command)
@@ -83,27 +83,27 @@ slideshare2pdf https://www.slideshare.net/slideshow/netflix-casestudyfina-lv2/24
 
 ### Options
 
-| Flag | Default | Description |
-|---|---|---|
-| `url` | — | Presentation link, or the address of a single slide image |
-| `-o`, `--out` | `<title>.pdf` | Output PDF; a directory is also accepted |
-| `-s`, `--size` | `2048` | Slide width in px: `2048`, `1024`, `638`, `320` |
-| `--slides` | all | Which slides, e.g. `1-10,15,30-` |
-| `-k`, `--keep` | off | Keep the downloaded images next to the PDF |
-| `-j`, `--jobs` | `6` | Parallel downloads |
-| `--no-tui` | off | Plain console output instead of the TUI |
+| Flag           | Default       | Description                                               |
+| -------------- | ------------- | --------------------------------------------------------- |
+| `url`          | —             | Presentation link, or the address of a single slide image |
+| `-o`, `--out`  | `<title>.pdf` | Output PDF; a directory is also accepted                  |
+| `-s`, `--size` | `2048`        | Slide width in px: `2048`, `1024`, `638`, `320`           |
+| `--slides`     | all           | Which slides, e.g. `1-10,15,30-`                          |
+| `-k`, `--keep` | off           | Keep the downloaded images next to the PDF                |
+| `-j`, `--jobs` | `6`           | Parallel downloads                                        |
+| `--no-tui`     | off           | Plain console output instead of the TUI                   |
 
 The console mode is also selected automatically when stdout is not a TTY (piping, CI, cron).
 
 ### Keyboard shortcuts (TUI)
 
-| Key | Action |
-|---|---|
-| `Enter` (URL field) | Find slides |
-| `Ctrl+S` | Download PDF |
-| `Esc` | Stop the current job |
-| `Ctrl+O` | Open the finished PDF |
-| `Ctrl+Q` | Quit |
+| Key                 | Action                |
+| ------------------- | --------------------- |
+| `Enter` (URL field) | Find slides           |
+| `Ctrl+S`            | Download PDF          |
+| `Esc`               | Stop the current job  |
+| `Ctrl+O`            | Open the finished PDF |
+| `Ctrl+Q`            | Quit                  |
 
 The layout switches to a compact mode on terminals shorter than 30 rows, so 80×24 works fine.
 
@@ -130,7 +130,7 @@ The layout switches to a compact mode on terminals shorter than 30 rows, so 80×
 
 **"SlideShare showed a bot check instead of the presentation"**
 Wait a minute and retry. If it persists, open the deck in a browser, right-click a slide,
-choose *Copy image address* and paste that URL — the whole deck is rebuilt from a single image URL.
+choose _Copy image address_ and paste that URL — the whole deck is rebuilt from a single image URL.
 
 **"No slide images found on this page"**
 Same workaround: paste a slide image address instead of the page link.

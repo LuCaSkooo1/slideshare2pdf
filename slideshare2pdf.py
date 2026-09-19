@@ -11,10 +11,17 @@ Paste a presentation link, for example
 The script reads the page, finds the slide images the viewer shows
     https://image.slidesharecdn.com/<deck>/75/<Title>-<n>-2048.jpg
 downloads them in parallel and merges them into a single PDF.
-If the page is hidden behind a bot check, the embed player is tried instead.
 
-The address of any single slide image (image.slidesharecdn.com/...) works too;
-the number of slides is then found by probing the CDN.
+SlideShare sometimes answers a script with a bot check. The script then tries
+the embed player and the oEmbed API, and finally opens the page in a hidden
+Chrome/Chromium window (--dump-dom), which runs the check's JavaScript.
+If curl_cffi is installed it is used for the page, which often passes too.
+
+Instead of a link you can also give:
+    - the address of any single slide image (image.slidesharecdn.com/...)
+    - the embed code copied from the Share/Embed dialog
+    - a page saved from the browser, or any pasted HTML holding a slide image
+The number of slides is then found by probing the CDN.
 
 Run with uv (installs the dependencies by itself):
     uv run slideshare2pdf.py
@@ -37,7 +44,9 @@ import argparse
 import html
 import json
 import re
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -74,6 +83,13 @@ try:
 except ImportError:
     img2pdf = None
 
+try:
+    # optional: sends the TLS fingerprint of a real browser, which is often
+    # enough to get past SlideShare's bot check without starting a browser
+    from curl_cffi import requests as curl_requests
+except ImportError:
+    curl_requests = None
+
 
 # --------------------------------------------------------------------------
 # SlideShare specifics
@@ -101,14 +117,29 @@ TOTAL_RE = re.compile(r'"(?:totalSlides|total_slides|slideCount|numberOfPages)"\
 EMBED_RE = re.compile(r"(?:https?:)?//(?:www\.)?slideshare\.net/slideshow/embed_code/(?:key/)?[\w-]+")
 THUMB_RE = re.compile(r"ss_thumbnails/([^/?#\"'\s]+?)-thumbnail")      # og:image names the deck
 CHALLENGE_RE = re.compile(r"<title>\s*(?:Client Challenge|Just a moment|Attention Required)", re.I)
-AUTHOR_RES = (re.compile(r"Uploaded by(?:\s|<!--.*?-->|<[^>]*>)*([^<>]+?)\s*<", re.S),
-              re.compile(r'"author"\s*:\s*\{[^{}]*?"name"\s*:\s*"([^"]{1,120})"'))
+# a name never contains braces or quotes - that would be the page's own JSON data
+AUTHOR_RES = (re.compile(r'"(?:author|user|uploader)"\s*:\s*\{[^{}]{0,300}?'
+                         r'"(?:name|displayName|fullName)"\s*:\s*"([^"{}]{1,80})"'),
+              re.compile(r"Uploaded by(?:\s|<!--.*?-->|<[^>]*>)*([^<>{}\"]{1,80}?)\s*<", re.S),
+              re.compile(r"</strong>\s*from\s*<strong>\s*<a[^>]*>([^<{}\"]{1,80})</a>", re.I))
+SHARE_URL_RE = re.compile(r"https?://[\w.-]*slideshare\.net/[^\s\"'<>\\)]+", re.I)
 
-BLOCKED_MSG = ("SlideShare showed a bot check instead of the presentation. Try again in a minute, "
-               "or open the presentation in a browser, right-click a slide, choose "
-               "'Copy image address' and paste that link here.")
+# headless Chrome/Chromium runs the page's JavaScript, so it passes the bot check
+BROWSERS = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable",
+            "brave-browser", "microsoft-edge", "microsoft-edge-stable", "vivaldi")
+MAC_BROWSERS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser")
+
+PASTE_HINT = ("open the presentation in your browser, right-click a slide, choose "
+              "'Copy image address' and paste that link here")
+BROWSER_HINT = ("install Chromium or Chrome (then the page is opened in a hidden browser "
+                "window, which gets past the check)")
+BLOCKED_MSG = "SlideShare showed a bot check instead of the presentation."
 NO_SLIDES_MSG = ("No slide images found on this page. If the presentation opens in your browser, "
-                 "right-click a slide, choose 'Copy image address' and paste that link here.")
+                 + PASTE_HINT + ".")
+NO_TEXT_MSG = ("No slide images and no SlideShare link in that text. Paste a presentation link, "
+               "the embed code, or the address of one slide image.")
 
 Log = Callable[[str, str], None]          # log(level, message), level: info | ok | warn | error
 
@@ -230,6 +261,12 @@ def _meta(page: str, name: str) -> str:
     return ""
 
 
+def _clean(text: str, limit: int) -> str:
+    """One tidy line: pages sometimes hand out half of their JSON data."""
+    text = re.sub(r"\s+", " ", html.unescape(text)).strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
 def page_title(page: str) -> str:
     title = ""
     for name in ("og:title", "title", "twitter:title"):
@@ -238,16 +275,19 @@ def page_title(page: str) -> str:
             break
     else:
         m = re.search(r"<title[^>]*>(.*?)</title>", page, re.I | re.S)
-        title = html.unescape(m.group(1)).strip() if m else ""
-    title = re.sub(r"\s*\|\s*(?:PDF|PPTX?|SlideShare|Free Download)\b.*$", "", title, flags=re.I)
+        title = m.group(1) if m else ""
+    title = re.sub(r"\s*\|\s*(?:PDF|PPTX?|SlideShare|Free Download)\b.*$", "",
+                   _clean(title, 150), flags=re.I)
     return "" if title.lower() == "slideshare" else title
 
 
 def page_author(page: str) -> str:
-    for rx in AUTHOR_RES:
-        m = rx.search(page)
-        if m and m.group(1).strip():
-            return html.unescape(m.group(1)).strip()
+    """The name under the presentation - never a piece of the page's JSON."""
+    for source in [_meta(page, "author")] + [m.group(1) for m in
+                                             filter(None, (rx.search(page) for rx in AUTHOR_RES))]:
+        name = _clean(source, 80)
+        if name and not re.search(r"""[{}"<>\\]|\bhttps?:|\\u00""", name):
+            return name
     return ""
 
 
@@ -290,12 +330,88 @@ def _check(stop: threading.Event) -> None:
         raise ResolveError("Stopped.")
 
 
+def _get_page(url: str):
+    """One GET of a slideshare.net page, through curl_cffi if it is installed."""
+    if curl_requests is not None:
+        try:
+            return curl_requests.get(url, headers=PAGE_HEADERS, timeout=25, impersonate="chrome")
+        except Exception:                # any curl_cffi problem: fall back to requests
+            pass
+    return http().get(url, headers=PAGE_HEADERS, timeout=25)
+
+
+def find_browser() -> str:
+    """Path of an installed Chrome/Chromium, or "" if there is none."""
+    for name in BROWSERS:
+        exe = shutil.which(name)
+        if exe:
+            return exe
+    return next((app for app in MAC_BROWSERS if Path(app).exists()), "")
+
+
+def _kill(proc: "subprocess.Popen") -> None:
+    """Kill the browser and everything it started."""
+    try:
+        if os.name == "posix":
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        else:
+            proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.communicate(timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def browser_page(url: str, log: Log, stop: Optional[threading.Event] = None,
+                 seconds: int = 90) -> str:
+    """Load the page in a hidden Chrome/Chromium window and return the finished HTML.
+
+    The bot check is a piece of JavaScript, so a real browser engine simply passes it.
+    """
+    exe = find_browser()
+    if not exe:
+        return ""
+    log("info", f"Opening the page in {Path(exe).name} (hidden window)…")
+    with tempfile.TemporaryDirectory(prefix="slideshare2pdf-browser-") as profile:
+        cmd = [exe, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--mute-audio",
+               "--no-first-run", "--no-default-browser-check", "--disable-extensions",
+               f"--user-data-dir={profile}", f"--user-agent={UA}", "--window-size=1280,900",
+               "--lang=en-US", "--virtual-time-budget=25000", "--timeout=40000",
+               "--dump-dom", url]
+        if getattr(os, "geteuid", lambda: 1)() == 0:
+            cmd.insert(1, "--no-sandbox")            # Chrome refuses to run as root otherwise
+        try:                             # own process group, so children die with it
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    **({"start_new_session": True} if os.name == "posix" else {}))
+        except OSError as exc:
+            log("warn", f"The browser could not be started ({type(exc).__name__})")
+            return ""
+        deadline = time.monotonic() + seconds
+        while True:                      # wait, but stay interruptible
+            try:
+                out = proc.communicate(timeout=0.5)[0]
+                break
+            except subprocess.TimeoutExpired:
+                if (stop is not None and stop.is_set()) or time.monotonic() > deadline:
+                    _kill(proc)
+                    log("warn", "The browser was stopped" if stop and stop.is_set()
+                        else "The browser took too long")
+                    return ""
+    page = (out or b"").decode("utf-8", "replace")
+    if CHALLENGE_RE.search(page[:5000]):
+        log("warn", "The browser got the bot check as well")
+        return ""
+    return page
+
+
 def fetch_page(url: str) -> str:
     """GET a slideshare.net page. Raises Blocked for a bot check, ResolveError for other errors."""
     error = "no response"
     for attempt in range(3):
         try:
-            r = http().get(url, headers=PAGE_HEADERS, timeout=25)
+            r = _get_page(url)
         except requests.RequestException as exc:
             error = _net_error(exc)
         else:
@@ -393,14 +509,15 @@ def _alternatives(url: str, page: str) -> list[tuple[str, str]]:
     return alts
 
 
-def _read_slideshare(url: str, log: Log, stop: threading.Event) -> tuple[Deck, list[int]]:
-    """Read a slideshare.net page (or, if that fails, its embed player) -> (deck, page totals)."""
+def _read_slideshare(url: str, log: Log, stop: threading.Event,
+                     browser: bool = True) -> tuple[Deck, list[int]]:
+    """Read a slideshare.net page (or its embed player, or a hidden browser window)."""
     log("info", f"Reading {url}")
-    page, problem = "", None
+    page, blocked = "", False
     try:
         page = fetch_page(url)
-    except Blocked as exc:
-        problem = exc
+    except Blocked:
+        blocked = True
         log("warn", "SlideShare answered with a bot check")
     docs = [page] if page else []
     deck = deck_from_text(page, url, _preferred_key(page)) if page else None
@@ -415,14 +532,30 @@ def _read_slideshare(url: str, log: Log, stop: threading.Event) -> tuple[Deck, l
         log("info", f"Trying the {label}…")
         try:
             text = fetch_page(alt)
+        except Blocked:
+            blocked = True
+            continue
         except ResolveError:
             continue
         docs.append(text)
         deck = deck_from_text(text, url, _preferred_key(text)) or _deck_from_oembed(_json(text), url)
         queue += [("embed player", normalize_link(m.group(0)))
                   for m in EMBED_RE.finditer(_unescape(text))]
+
+    if deck is None and browser:                     # let a real browser do the work
+        _check(stop)
+        rendered = browser_page(url, log, stop)
+        if rendered:
+            page, docs = rendered, docs + [rendered]
+            deck = deck_from_text(rendered, url, _preferred_key(rendered))
+            if deck is not None:
+                log("ok", "The browser got the page")
+
     if deck is None:
-        raise problem or ResolveError(NO_SLIDES_MSG)
+        if blocked:
+            extra = "" if find_browser() or not browser else f" {BROWSER_HINT},"
+            raise Blocked(f"{BLOCKED_MSG} Try again in a minute,{extra} or {PASTE_HINT}.")
+        raise ResolveError(NO_SLIDES_MSG)
 
     oembed = next((d for d in map(_json, docs) if d), {})
     deck.title = (page_title(page) if page else "") or str(oembed.get("title") or "").strip() \
@@ -431,25 +564,59 @@ def _read_slideshare(url: str, log: Log, stop: threading.Event) -> tuple[Deck, l
     return deck, [int(t) for doc in docs for t in TOTAL_RE.findall(doc)]
 
 
-def resolve(link: str, log: Log = _no_log, stop: Optional[threading.Event] = None) -> Deck:
-    """Turn a SlideShare link (or one slide image URL) into a Deck."""
-    stop = stop or threading.Event()
-    url = normalize_link(link)
-    host = (urlparse(url).hostname or "").lower()
-    totals: list[int] = []
+def _pasted_text(link: str, log: Log) -> tuple[str, str]:
+    """(text, where it came from) if the input is a saved page or pasted HTML, else ("", "")."""
+    raw = link.strip()
+    if not raw.lower().startswith(("http://", "https://")) and len(raw) < 4096:
+        try:
+            path = Path(raw.strip("'\"")).expanduser()
+            if path.is_file():
+                log("info", f"Reading {path.name}")
+                return path.read_text("utf-8", errors="replace"), path.name
+        except OSError:
+            pass
+    if re.search(r"[\s<>]", raw):                      # pasted embed code or page source
+        return raw, "the pasted text"
+    return "", ""
 
-    if host.endswith("slidesharecdn.com"):
-        deck = deck_from_text(url, url)
-        if deck is None:
-            raise ResolveError("This image link does not look like a slide "
-                               "(…/<Title>-<number>-<width>.jpg).")
-        deck.title = title_from_slug(deck.slug)
-        log("info", "Link to one slide image: counting the slides on the CDN…")
-    elif host == "slideshare.net" or host.endswith(".slideshare.net"):
-        deck, totals = _read_slideshare(url, log, stop)
-    else:
-        raise ResolveError("That is not a slideshare.net link. Paste the address of a presentation, "
-                           "e.g. https://www.slideshare.net/slideshow/<name>/<id>")
+
+def resolve(link: str, log: Log = _no_log, stop: Optional[threading.Event] = None,
+            browser: bool = True) -> Deck:
+    """Turn a SlideShare link, a slide image link, a saved page or pasted HTML into a Deck."""
+    stop = stop or threading.Event()
+    totals: list[int] = []
+    deck = None
+
+    text, where = _pasted_text(link, log)
+    if text:
+        deck = deck_from_text(text, where, _preferred_key(text))
+        if deck is not None:
+            deck.title = page_title(text) or title_from_slug(deck.slug)
+            deck.author = page_author(text)
+            totals = [int(t) for t in TOTAL_RE.findall(text)]
+            log("ok", f"Found slide images in {where}")
+        else:
+            found = SHARE_URL_RE.search(_unescape(text))
+            if found is None:
+                raise ResolveError(NO_TEXT_MSG)
+            link = found.group(0)
+            log("info", f"Using the link from {where}: {link}")
+
+    if deck is None:
+        url = normalize_link(link)
+        host = (urlparse(url).hostname or "").lower()
+        if host.endswith("slidesharecdn.com"):
+            deck = deck_from_text(url, url)
+            if deck is None:
+                raise ResolveError("This image link does not look like a slide "
+                                   "(…/<Title>-<number>-<width>.jpg).")
+            deck.title = title_from_slug(deck.slug)
+            log("info", "Link to one slide image: counting the slides on the CDN…")
+        elif host == "slideshare.net" or host.endswith(".slideshare.net"):
+            deck, totals = _read_slideshare(url, log, stop, browser)
+        else:
+            raise ResolveError("That is not a slideshare.net link. Paste a presentation address, "
+                               "e.g. https://www.slideshare.net/slideshow/<name>/<id>")
 
     deck.total = find_total(deck, totals, log, stop)
     return deck
@@ -709,6 +876,8 @@ class SlideShareApp(App):
     #info-title { color: $primary; text-style: bold; }
     #info-url { color: $text-muted; }
     #info.error { border: round $error; border-title-color: $error; background: $error 8%; }
+    #info { max-height: 12; }                    /* never let one odd page take over the screen */
+    Screen.-short #info { max-height: 8; }
     #info.error #info-title { color: $error; }
 
     #options { margin-top: 1; }
@@ -814,7 +983,7 @@ class SlideShareApp(App):
         self.query_one("#slides", Input).tooltip = "all slides, or e.g. 1-10, 15, 30-"
         self.query_one("#keep", Checkbox).tooltip = "Keep the slide images in a folder next to the PDF"
         self._show_info("Paste a presentation link above and press Enter.",
-                        "The address of one slide image (image.slidesharecdn.com/…) works too.",
+                        "A slide image address, the embed code or a saved .html page work too.",
                         "Slides: leave empty for all, or type e.g. 1-10, 15, 30-")
         url = self.query_one("#url", Input)
         url.focus()
@@ -901,7 +1070,8 @@ class SlideShareApp(App):
     @work(thread=True, exclusive=True, group="job")
     def _find_worker(self, url: str) -> None:
         try:
-            deck = resolve(url, log=self._log_from_thread, stop=self.stop_event)
+            deck = resolve(url, log=self._log_from_thread, stop=self.stop_event,
+                           browser=not self.args.no_browser)
         except ResolveError as exc:
             self._ui(self._find_failed, str(exc))
         except Exception as exc:                     # keep the UI usable whatever happens
@@ -1036,7 +1206,7 @@ def run_cli(args: argparse.Namespace) -> int:
             log(level, msg)
 
     try:
-        deck = resolve(args.url, log=log)
+        deck = resolve(args.url, log=log, browser=not args.no_browser)
         slides = parse_slides(args.slides, deck.total)
     except (ResolveError, ValueError) as exc:
         log("error", str(exc))
@@ -1062,7 +1232,7 @@ def run_cli(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Download a SlideShare presentation as one PDF.")
     parser.add_argument("url", nargs="?", default="",
-                        help="presentation link (or the address of one slide image)")
+                        help="presentation link, slide image link, embed code or a saved .html page")
     parser.add_argument("-o", "--out", default="",
                         help="output PDF (default: '<title>.pdf' in the current folder)")
     parser.add_argument("-s", "--size", type=int, choices=SIZES, default=2048,
@@ -1071,6 +1241,8 @@ def main() -> int:
     parser.add_argument("-k", "--keep", action="store_true",
                         help="keep the downloaded images next to the PDF")
     parser.add_argument("-j", "--jobs", type=int, default=6, help="parallel downloads (default: 6)")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="never start a hidden Chrome/Chromium to get past the bot check")
     parser.add_argument("--no-tui", action="store_true", help="plain console output, no TUI")
     args = parser.parse_args()
 
