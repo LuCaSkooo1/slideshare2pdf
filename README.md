@@ -5,7 +5,7 @@ Download a SlideShare presentation as a single PDF — from a terminal UI or the
 Paste a presentation link, the script finds the slide images the SlideShare viewer serves from
 `image.slidesharecdn.com`, downloads them in parallel and merges them into one PDF.
 
-![slideshare2pdf TUI](https://github.com/user-attachments/assets/df4752e9-0b63-4a28-b5a5-a6da0d984e5a)
+![slideshare2pdf in a terminal]([https://github.com/user-attachments/assets/1a2b3c4d-…](https://github.com/user-attachments/assets/9860bff8-83d6-4a1a-8282-d8650e439126))
 
 ## Features
 
